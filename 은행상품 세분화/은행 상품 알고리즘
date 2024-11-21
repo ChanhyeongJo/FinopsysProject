@@ -1,0 +1,96 @@
+# 경고메세지 제거
+import warnings
+warnings.filterwarnings('ignore')
+
+# library import
+import numpy as np
+import pandas as pd
+import glob
+
+# 시각화 library import
+!pip install missingno
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+#한글폰트 오류안나게
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+
+# Use a system font that's available in Linux environments
+# Replace 'NanumGothic' with any other system font if necessary
+!apt-get update -qq
+!apt-get install -qq fonts-nanum > /dev/null
+font_fname = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf' # Use NanumGothic as an example
+
+font_family = font_manager.FontProperties(fname=font_fname).get_name()
+plt.rcParams['font.family'] = font_family
+
+# 우대금리사항 제외한 칼럼
+df_상품 = pd.read_csv('processed_dataset_dropped.csv')
+# 필요 칼럼만 가져옴
+# necessary_columns = [
+#    '남녀구분코드', '연령', 'VIP등급코드', '거주시도명', '직장시도명',
+#    '이용금액_R3M_신용', '이용금액_R3M_체크', '총이용금액', '_1순위신용체크구분',
+#    'Life_Stage', '연체비율', '정규화_부유도', '소지카드수_유효_신용',
+#    '유효카드수_체크', '회원여부_연체'
+#]
+df_회원 = pd.read_csv('df_회원_필요칼럼.csv')
+
+# 상품추천 알고리즘
+from joblib import Parallel, delayed
+
+# 가입금액 전처리 함수 정의
+def process_join_amount(value):
+    try:
+        if "제한없음" in value or "0원" in value:
+            return 0
+        if "백" in value:
+            return float(value.replace("백", "").strip()) * 100
+        if "천" in value:
+            return float(value.replace("천", "").strip()) * 1000
+        return float(value.replace("만원", "").split("~")[0].strip())
+    except Exception:
+        return None
+
+# 상품 필터링 및 추천 함수 (회원 단위 처리)
+def recommend_for_member(member, df_상품):
+    filtered_products = df_상품[
+        df_상품['가입대상고객_조건'].str.contains(str(member['Life_Stage']), na=False)
+    ]
+    filtered_products = filtered_products[
+        (filtered_products['processed_가입금액'] <= member['총이용금액']) | 
+        (filtered_products['processed_가입금액'].isnull())
+    ]
+    filtered_products = filtered_products[
+        filtered_products['기타_상품가입_고려사항'].str.contains(member['거주시도명'], na=False)
+    ]
+    
+    filtered_products['매칭점수'] = (
+        (filtered_products['가입대상고객_조건'].str.contains(str(member['Life_Stage']), na=False).astype(float)) * 0.5 +
+        (filtered_products['processed_가입금액'] / member['총이용금액']) * 0.3 +
+        (1 - member['연체비율']) * 0.2
+    )
+    
+    filtered_products['매칭점수'] = filtered_products['매칭점수'].astype(float)
+    top_products = filtered_products.nlargest(3, '매칭점수')
+    
+    return {
+        '회원인덱스': member.name,
+        '추천상품': top_products['상품명'].tolist()
+    }
+
+# 전체 회원 데이터를 병렬로 처리
+def recommend_parallel(df_회원, df_상품, n_jobs=4):
+    df_상품['processed_가입금액'] = df_상품['가입금액'].apply(process_join_amount)
+    results = Parallel(n_jobs=n_jobs, backend='multiprocessing')(
+        delayed(recommend_for_member)(member, df_상품) for _, member in df_회원.iterrows()
+    )
+    return pd.DataFrame(results)
+
+# 병렬 처리 실행
+n_jobs = 8  # 사용 가능한 CPU 코어 수 지정
+df_추천결과 = recommend_parallel(df_회원, df_상품, n_jobs=n_jobs)
+
+# 추천 결과 확인
+df_추천결과.head()
