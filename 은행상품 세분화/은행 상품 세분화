@@ -1,0 +1,45 @@
+## 데이터 분석 셋팅
+
+# 경고메세지 제거
+import warnings
+warnings.filterwarnings('ignore')
+
+# library import
+import numpy as np
+import pandas as pd
+import glob
+
+# 시각화 library import
+!pip install missingno
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+#한글폰트 오류안나게
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+
+# Use a system font that's available in Linux environments
+# Replace 'NanumGothic' with any other system font if necessary
+!apt-get update -qq
+!apt-get install -qq fonts-nanum > /dev/null
+font_fname = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf' # Use NanumGothic as an example
+
+font_family = font_manager.FontProperties(fname=font_fname).get_name()
+plt.rcParams['font.family'] = font_family
+
+## 은행 상품 데이터 셋 로드 및 전처리
+
+# 은행수신 상품 로드
+dfb = pd.read_csv('은행수신상품.csv')
+# 1금융 상품만 로드
+selected_banks = [
+    '대구은행', '우리은행', '농협은행', 
+    '신한은행', '국민은행', '하나은행', '카카오뱅크'
+]
+dfb = dfb[dfb['은행명'].isin(selected_banks)]
+
+## 은행 상품 데이터 셋 세분화를 위해서 상품의 조건들 => 칼럼 중 우대금리사항은 항목이 많고 필터링이 쉽지 않아 따로 처리. 여기서는 우대금리사항 부분은 이후에 추가 예정
+
+
+
