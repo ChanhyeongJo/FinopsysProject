@@ -1,0 +1,163 @@
+import random
+import pandas as pd
+import re
+
+# Life_Stage 매핑
+life_stage_mapping = {
+    1: "청년",
+    2: "가족형성기",
+    3: "자녀출산기",
+    4: "자녀성장기",
+    5: "자녀출가기",
+    6: "노령"
+}
+
+# 가입금액 전처리 함수
+def process_join_amount(value, avg_amount=1000000):
+    try:
+        if pd.isna(value) or "제한없음" in value or "0원" in value:
+            return avg_amount
+        if isinstance(value, str) and "~" in value:
+            match = re.search(r"(\d+)[억|천|백|만원]*", value.split("~")[0])
+            if match:
+                return convert_to_numeric(match.group(1))
+        if isinstance(value, str):
+            match = re.search(r"(\d+)[억|천|백|만원]*", value)
+            if match:
+                return convert_to_numeric(match.group(1))
+        return float(value)
+    except Exception as e:
+        print(f"Error processing value '{value}': {e}")
+        return avg_amount
+
+def convert_to_numeric(value):
+    if "억" in value:
+        return float(value.replace("억", "").strip()) * 100000000
+    if "천" in value:
+        return float(value.replace("천", "").strip()) * 1000
+    if "백" in value:
+        return float(value.replace("백", "").strip()) * 100
+    if "만원" in value:
+        return float(value.replace("만원", "").strip()) * 10000
+    return float(value)
+
+# 필터링 함수
+def filter_products(member_info, products, life_stage_mapping):
+    def is_valid_product(product):
+        product_condition = str(product['가입대상고객_조건']).replace("\n", "").replace(" ", "").strip()
+        product_name = str(product['상품명']).replace("\n", "").replace(" ", "").strip()
+        member_age = member_info['age']
+
+        # 군적금 및 장병 상품 필터링
+        if "군" in product_name or "군적금" in product_name or "장병" in product_name:
+            return False
+
+        # 청년/청춘/청년 우대형 관련 상품 필터링
+        if member_age > 34:  # 나이가 34세 초과일 경우
+            if "청년" in product_condition or "청춘" in product_condition or "청년우대형" in product_name or "청춘희망적금" in product_name:
+                return False
+
+        # 50대 이상에서 적합하지 않은 상품 필터링
+        if member_age >= 50:
+            if "희망" in product_name or "도전" in product_name or "청년도약" in product_name:
+                return False
+
+        # 일반 Life Stage 매칭
+        life_stage_num = str(member_info['Life_Stage'])
+        life_stage_keyword = life_stage_mapping.get(member_info['Life_Stage'], "")
+        if life_stage_num in product_condition or life_stage_keyword in product_condition:
+            return True
+
+        # 연령 범위 필터링
+        age_range = re.search(r"만(\d+)세~만(\d+)세", product_condition)
+        if age_range:
+            min_age, max_age = map(int, age_range.groups())
+            if min_age <= member_age <= max_age:
+                return True
+
+        return False
+
+    filtered_products = products[products.apply(is_valid_product, axis=1)]
+    return filtered_products
+
+# 매칭 점수 계산 함수
+def calculate_score(member_info, product, weight_factors, preferred_duration="12개월 이상 ~ 24개월 미만"):
+    life_stage_keyword = life_stage_mapping.get(member_info['Life_Stage'], "")
+    life_stage_match = 1 if (
+        str(member_info['Life_Stage']) in str(product['가입대상고객_조건']) or
+        life_stage_keyword in str(product['가입대상고객_조건'])
+    ) else 0
+
+    join_amount_score = min(product['processed_가입금액'] / (member_info['총이용금액'] + 1e-6), 0.5)
+    credit_score = max(0.1, 1 - member_info['연체비율'])
+    duration_match = 1 if preferred_duration in str(product['계약기간']) else 0
+
+    total_score = (
+        life_stage_match * weight_factors['life_stage'] +
+        join_amount_score * weight_factors['join_amount'] +
+        credit_score * weight_factors['delinquency'] +
+        duration_match * weight_factors['preferred_duration']
+    )
+    return total_score
+
+# 추천 알고리즘
+def recommend_products(member_info, products, weight_factors, top_n=5):
+    # 가입금액 전처리
+    valid_amounts = products['가입금액'].apply(lambda x: process_join_amount(x, 1000000))
+    avg_amount = valid_amounts.mean()
+    products['processed_가입금액'] = products['가입금액'].apply(lambda x: process_join_amount(x, avg_amount))
+
+    # 필터링 적용
+    filtered_products = filter_products(member_info, products, life_stage_mapping)
+
+    # 매칭 점수 계산
+    preferred_duration = member_info.get('선호계약기간', "12개월 이상 ~ 24개월 미만")
+    filtered_products['매칭점수'] = filtered_products.apply(
+        lambda product: calculate_score(member_info, product, weight_factors, preferred_duration), axis=1
+    )
+
+    # 추천 결과 반환
+    recommended_products = (
+        filtered_products.nlargest(top_n, '매칭점수')
+        .drop_duplicates(subset='상품명')[['상품명', '매칭점수']]
+    )
+
+    return recommended_products
+
+# 랜덤 회원 정보 생성 함수
+def generate_random_member(age_range, life_stage_options):
+    age = random.randint(*age_range)
+    life_stage = random.choice(life_stage_options)
+    total_spent = random.randint(100000, 1000000)
+    delinquency_ratio = random.uniform(0, 0.3)
+    preferred_duration = random.choice(["6개월 이상 ~ 12개월 미만", "12개월 이상 ~ 24개월 미만", "24개월 이상"])
+    return {
+        "Life_Stage": life_stage,
+        "age": age,
+        "총이용금액": total_spent,
+        "연체비율": delinquency_ratio,
+        "선호계약기간": preferred_duration
+    }
+
+# 가중치 설정
+weight_factors = {
+    "life_stage": 0.4,
+    "join_amount": 0.3,
+    "delinquency": 0.2,
+    "preferred_duration": 0.1
+}
+
+# 연령대별 랜덤 회원 정보 생성 및 추천
+age_ranges = {
+    "20대": ((20, 29), [1]),
+    "30대": ((30, 39), [1, 2, 3]),
+    "40대": ((40, 49), [1, 2, 3, 4]),
+    "50대": ((50, 59), [4, 5, 6]),
+    "60대": ((60, 69), [6])
+}
+
+for age_group, (age_range, life_stage_options) in age_ranges.items():
+    random_member = generate_random_member(age_range, life_stage_options)
+    recommended = recommend_products(random_member, df_상품, weight_factors, top_n=5)
+    print(f"\n{age_group} 추천 결과:")
+    print(recommended)
