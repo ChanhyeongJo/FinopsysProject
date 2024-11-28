@@ -1,0 +1,190 @@
+import streamlit as st
+import pandas as pd
+import re
+
+# Life_Stage 매핑
+life_stage_mapping = {
+    1: "청년",
+    2: "가족형성기",
+    3: "자녀출산기",
+    4: "자녀성장기",
+    5: "자녀출가기",
+    6: "노령"
+}
+
+# 데이터 로드 함수
+@st.cache_data
+def load_data(user_file, card_file, product_file):
+    try:
+        user_data = pd.read_csv(user_file)
+        card_data = pd.read_csv(card_file, encoding='cp949')
+        product_data = pd.read_csv(product_file)
+    except Exception as e:
+        st.error(f"Error loading files: {e}")
+        st.stop()
+    return user_data, card_data, product_data
+
+# 가입금액 전처리 함수
+def process_join_amount(value, avg_amount=1000000):
+    try:
+        if pd.isna(value) or "제한없음" in value or "0원" in value:
+            return avg_amount
+        if isinstance(value, str) and "~" in value:
+            match = re.search(r"(\d+)[억|천|백|만원]*", value.split("~")[0])
+            if match:
+                return convert_to_numeric(match.group(1))
+        if isinstance(value, str):
+            match = re.search(r"(\d+)[억|천|백|만원]*", value)
+            if match:
+                return convert_to_numeric(match.group(1))
+        return float(value)
+    except Exception as e:
+        return avg_amount
+
+def convert_to_numeric(value):
+    if "억" in value:
+        return float(value.replace("억", "").strip()) * 100000000
+    if "천" in value:
+        return float(value.replace("천", "").strip()) * 1000
+    if "백" in value:
+        return float(value.replace("백", "").strip()) * 100
+    if "만원" in value:
+        return float(value.replace("만원", "").strip()) * 10000
+    return float(value)
+
+# 카드 추천 함수
+def recommend_cards(cluster_detail, card_data, valid_card_count):
+    if '카드_수' in card_data.columns:
+        recommended_cards = card_data[
+            (card_data['Cluster_num'] == cluster_detail) &
+            (card_data['카드_수'] >= valid_card_count)
+        ]
+    else:
+        recommended_cards = card_data[card_data['Cluster_num'] == cluster_detail]
+    return recommended_cards['카드명'].tolist()
+
+# 은행 상품 필터링 함수
+def filter_products(member_info, products, life_stage_mapping):
+    def is_valid_product(product):
+        life_stage_keyword = life_stage_mapping.get(member_info['Life_Stage'], "")
+        member_age = member_info['age']
+
+        # Check if Life Stage or Age Range is compatible
+        if life_stage_keyword in str(product['가입대상고객_조건']):
+            return True
+
+        age_range = re.search(r"만 (\d+)세\s*~\s*만 (\d+)세", str(product['가입대상고객_조건']))
+        if age_range:
+            min_age, max_age = map(int, age_range.groups())
+            if min_age <= member_age <= max_age:
+                return True
+
+        # Check for product with no specific conditions
+        if "제한없음" in str(product['가입대상고객_조건']):
+            return True
+
+        return False
+
+    filtered_products = products[products.apply(is_valid_product, axis=1)]
+    return filtered_products
+
+# 은행 상품 매칭 점수 계산 함수
+def calculate_score(member_info, product, weight_factors, preferred_duration="12개월 이상 ~ 24개월 미만"):
+    life_stage_keyword = life_stage_mapping.get(member_info['Life_Stage'], "")
+    life_stage_match = 1 if (
+        str(member_info['Life_Stage']) in str(product['가입대상고객_조건']) or
+        life_stage_keyword in str(product['가입대상고객_조건'])
+    ) else 0
+
+    join_amount_score = min(product['processed_가입금액'] / (member_info['총이용금액'] + 1e-6), 0.5)
+    credit_score = max(0.1, 1 - member_info['연체비율'])
+    duration_match = 1 if preferred_duration in str(product['계약기간']) else 0
+
+    total_score = (
+        life_stage_match * weight_factors['life_stage'] +
+        join_amount_score * weight_factors['join_amount'] +
+        credit_score * weight_factors['delinquency'] +
+        duration_match * weight_factors['preferred_duration']
+    )
+    return total_score
+
+# 은행 상품 추천 함수
+def recommend_products(member_info, products, weight_factors, top_n=3):
+    valid_amounts = products['가입금액'].apply(lambda x: process_join_amount(x, 1000000))
+    avg_amount = valid_amounts.mean()
+    products['processed_가입금액'] = products['가입금액'].apply(lambda x: process_join_amount(x, avg_amount))
+
+    filtered_products = filter_products(member_info, products, life_stage_mapping)
+
+    if filtered_products.empty:
+        return pd.DataFrame(columns=['상품명', '매칭점수'])
+
+    preferred_duration = member_info.get('선호계약기간', "12개월 이상 ~ 24개월 미만")
+    filtered_products['매칭점수'] = filtered_products.apply(
+        lambda product: calculate_score(member_info, product, weight_factors, preferred_duration), axis=1
+    )
+
+    recommended_products = (
+        filtered_products.nlargest(top_n, '매칭점수')
+        .drop_duplicates(subset='상품명')[['상품명', '매칭점수']]
+    )
+    return recommended_products
+
+# Streamlit 앱
+st.title("통합 금융 추천 시스템")
+
+# 데이터 업로드
+st.sidebar.header("데이터 업로드")
+user_file = st.sidebar.file_uploader("회원 데이터 파일", type="csv")
+card_file = st.sidebar.file_uploader("카드 데이터 파일", type="csv")
+product_file = st.sidebar.file_uploader("상품 데이터 파일", type="csv")
+
+if user_file and card_file and product_file:
+    user_data, card_data, product_data = load_data(user_file, card_file, product_file)
+
+    # 사용자 입력
+    st.sidebar.header("회원 정보 입력")
+    age = st.sidebar.number_input("나이", min_value=18, max_value=100, value=30)
+    life_stage = st.sidebar.selectbox("Life Stage", options=list(life_stage_mapping.keys()), format_func=lambda x: life_stage_mapping[x])
+    total_usage = st.sidebar.number_input("총 이용 금액", min_value=0, value=100000)
+    delinquency_ratio = st.sidebar.slider("연체 비율", min_value=0.0, max_value=1.0, value=0.05)
+    valid_card_count = st.sidebar.number_input("유효 카드 수", min_value=0, value=1)
+    preferred_duration = st.sidebar.text_input("선호 계약 기간", value="12개월 이상 ~ 24개월 미만")
+
+    if st.sidebar.button("추천 결과 보기"):
+        # 카드 추천
+        st.subheader("카드 추천")
+        user_data['distance'] = abs(user_data['연령'] - age) + abs(user_data['Life_Stage'] - life_stage)
+        matched_user = user_data.loc[user_data['distance'].idxmin()]
+        predicted_cluster_detail = matched_user['Cluster']
+        recommended_cards = recommend_cards(predicted_cluster_detail, card_data, valid_card_count)
+        if recommended_cards:
+            st.write("추천 카드 목록:")
+            for card in recommended_cards:
+                st.write(f"- {card}")
+        else:
+            st.write("조건에 맞는 카드가 없습니다.")
+
+        # 은행 상품 추천
+        st.subheader("은행 상품 추천")
+        member_info = {
+            "Life_Stage": life_stage,
+            "age": age,
+            "총이용금액": total_usage,
+            "연체비율": delinquency_ratio,
+            "선호계약기간": preferred_duration
+        }
+        weight_factors = {
+            "life_stage": 0.4,
+            "join_amount": 0.3,
+            "delinquency": 0.2,
+            "preferred_duration": 0.1
+        }
+        recommended_products = recommend_products(member_info, product_data, weight_factors)
+        if not recommended_products.empty:
+            st.write("추천 상품 목록:")
+            st.write(recommended_products)
+        else:
+            st.write("조건에 맞는 상품이 없습니다.")
+else:
+    st.write("모든 데이터 파일을 업로드하세요.")
